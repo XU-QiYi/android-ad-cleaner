@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from unittest.mock import Mock, patch
@@ -33,7 +34,15 @@ class LockTests(unittest.TestCase):
             other = session.DeviceLock(serial + "-different-device")
             other.close()
             child.terminate(); child.wait(timeout=10)
-            lock = session.DeviceLock(serial)  # 即使 owner 被强制终止也不会永久锁死
+            deadline = time.time() + 2
+            while True:
+                try:
+                    lock = session.DeviceLock(serial)  # 即使 owner 被强制终止也不会永久锁死
+                    break
+                except session.DeviceBusyError:
+                    if time.time() >= deadline:
+                        raise
+                    time.sleep(0.05)  # Windows 可能在进程退出后短暂保留文件锁
             lock.close()
         finally:
             if child.poll() is None:
