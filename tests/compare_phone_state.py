@@ -1,6 +1,11 @@
 """纯重构的对拍驱动：同一份页面样本喂给两份 `tool/`，比较可观察输出。
 
-基线取改动前的 worktree，样本取本仓库 `tests/` 里的 `<hierarchy>` 字面量：
+基线取改动前的提交，样本取本仓库 `tests/` 里的 `<hierarchy>` 字面量。驱动自己拉临时
+worktree、跑完删掉：
+
+    python tests/compare_phone_state.py --baseline <改动前的提交>
+
+也可以手工备好一份 worktree，把它的 tool 目录传进来：
 
     git worktree add /tmp/aac-baseline <改动前的提交>
     python tests/compare_phone_state.py /tmp/aac-baseline/tool
@@ -14,9 +19,12 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
@@ -132,6 +140,28 @@ def dump(tool_dir):
     return {"texts": texts(), "entries": entries(), "off": off()}
 
 
+@contextmanager
+def baseline_tool_dir(sha):
+    """把 <sha> 解到临时 worktree，交出它的 tool/；退出时删掉 worktree 与临时目录。"""
+    root = TESTS.parent
+    tmp = Path(tempfile.mkdtemp(prefix="aac-baseline-"))
+    tree = tmp / "tree"
+    added = False
+    try:
+        try:
+            subprocess.run(["git", "worktree", "add", "--detach", str(tree), sha],
+                           cwd=root, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            sys.exit(f"找不到提交 {sha}：先 git fetch origin {sha}\n{e.stderr.strip()}")
+        added = True
+        yield tree / "tool"
+    finally:
+        if added:
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)],
+                           cwd=root, check=False, capture_output=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def collect(tool_dir):
     proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--dump", str(tool_dir)],
                           capture_output=True, text=True, encoding="utf-8")
@@ -177,13 +207,8 @@ def off_guards(records):
     return bad
 
 
-def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--dump":
-        print(json.dumps(dump(sys.argv[2]), ensure_ascii=False, sort_keys=True))
-        return
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    before, after = collect(sys.argv[1]), collect(str(TESTS.parent / "tool"))
+def compare(baseline_tool):
+    before, after = collect(str(baseline_tool)), collect(str(TESTS.parent / "tool"))
     bad = 0
     for key in before:
         bm, am = {x["id"]: x for x in before[key]}, {x["id"]: x for x in after[key]}
@@ -200,7 +225,20 @@ def main():
                    and v != e[k.rsplit("|", 1)[0] + "|"])
     print(f"守卫：读屏策略改变输出的组数 {flipped}，包名过滤改变输出的页数 {filtered}")
     bad += off_guards(after["off"])
-    sys.exit(1 if bad else 0)
+    return 1 if bad else 0
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--dump":
+        print(json.dumps(dump(sys.argv[2]), ensure_ascii=False, sort_keys=True))
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == "--baseline":
+        with baseline_tool_dir(sys.argv[2]) as tool_dir:
+            bad = compare(tool_dir)
+        sys.exit(bad)
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    sys.exit(compare(sys.argv[1]))
 
 
 if __name__ == "__main__":
