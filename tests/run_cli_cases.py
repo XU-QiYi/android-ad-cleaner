@@ -32,6 +32,10 @@ PHONE = [
 GONE = [{"match": "", "rc": 1, "stdout": "", "stderr": "adb: device 'S' not found"}]
 
 QUICKAPP_INSTALLED = [
+    # 批量清单先行（quickapps 的装机判定）；-d 那条排前，别让组件混进 disable 清单
+    {"match": "pm list packages --user 0 -d", "stdout": ""},
+    {"match": "pm list packages", "stdout": "package:com.nearme.instant.platform\npackage:com.oppo.instant.local.service\n"},
+    # 逐包 pm path：清单读不到时的退回通路，旧实现也走这条
     {"match": "pm path com.nearme.instant.platform", "stdout": "package:/data/app/platform/base.apk\n"},
     {"match": "pm path com.oppo.instant.local.service", "stdout": "package:/data/app/local/base.apk\n"},
     {"match": "pm path", "stdout": ""},
@@ -93,7 +97,7 @@ CASES = [
          [{"match": "pm unsuspend", "stdout": ""}] + GONE,
          seed={BACKUP_DIR + "/suspended.txt": "com.example.ad\n"}, expect=["wait-for-device"]),
     case("quickapp-没有组件", ["-s", "S", "quickapp"], PHONE,
-         expect=["dumpsys usagestats", "pm path"]),
+         expect=["dumpsys usagestats", "pm list packages"]),
     case("quickapp-off-成功", ["-s", "S", "quickapp", "off"],
          [{"match": "pm suspend", "stdout": "", "set": {"suspended": "true"}}] + QUICKAPP_INSTALLED + PHONE,
          expect=["pm suspend --user 0 com.oppo.instant.local.service", "am force-stop --user 0 com.oppo.instant.local.service"]),
@@ -104,7 +108,7 @@ CASES = [
          [{"match": "pm unsuspend", "stdout": "", "set": {"suspended": "false"}}] + QUICKAPP_INSTALLED + PHONE,
          state={"suspended": "true"}, expect=["pm unsuspend --user 0 com.oppo.instant.local.service"]),
     case("quickapp-未知子命令", ["-s", "S", "quickapp", "bogus"], QUICKAPP_INSTALLED + PHONE,
-         expect=["dumpsys usagestats"]),
+         expect=["pm list packages"]),
     case("quickapp-断线", ["-s", "S", "quickapp"], GONE, expect=["wait-for-device"]),
     case("finish-成功", ["-s", "S", "finish"],
          [{"match": "settings get global development_settings_enabled", "stdout": "1\n"}] + PHONE,

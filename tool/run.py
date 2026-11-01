@@ -346,13 +346,22 @@ def set_quickapp_service(serial, restore=False):
     return f"快应用服务{'已恢复原值 ' + target if restore else '已关闭'}"
 
 
-def quickapps(serial):
-    """装着的快应用组件，带状态。"""
-    ev = sh(serial, "dumpsys usagestats")
+def quickapps(serial, with_usage=True):
+    """装着的快应用组件，带状态。with_usage=False 跳过 usagestats（部分机型上是大文件，
+    只有 check 的「近期打开次数」读它；off / on 不展示这项，不白拉）。
+    装机判定先用一次包清单批量过滤，清单两条通路都没读到包名时（HyperOS 4，Issue #192）
+    退回逐包 pm path，行为与批量前一致。"""
+    ev = sh(serial, "dumpsys usagestats") if with_usage else ""
     disabled = set(re.findall(r"(?m)^package:(\S+)", pkg_list(serial, "--user 0 -d")))
+    batch = pkg_list(serial, "--user 0")
+    listed = re.search(r"(?m)^package:", batch) is not None
+    known = set(re.findall(r"(?m)^package:(\S+)", batch))
     out = []
     for pkg, name, brand, tested in QUICKAPP:
-        if not installed(serial, pkg):
+        if listed:
+            if pkg not in known:
+                continue
+        elif not installed(serial, pkg):
             continue
         fg = len(re.findall(rf"type=ACTIVITY_RESUMED package={re.escape(pkg)}\b", ev))
         switch = quickapp_switch(serial) if pkg == "com.vivo.hybrid" else None
@@ -372,17 +381,28 @@ def quickapps(serial):
 
 def fold_open(serial):
     """折叠屏展开时屏幕接近正方形：引擎会找错位置，要合上用外屏。"""
-    m = re.search(r"(\d+)x(\d+)", sh(serial, "wm size").splitlines()[-1] if sh(serial, "wm size") else "")
+    out = sh(serial, "wm size")
+    m = re.search(r"(\d+)x(\d+)", out.splitlines()[-1] if out else "")
     if not m:
         return False
     w, h = int(m.group(1)), int(m.group(2))
     return min(w, h) / max(w, h) > 0.8
 
 
-def record(serial, pkgs, fn="suspended.txt"):
-    with open(os.path.join(latest_backup(serial), fn), "a", encoding="utf-8") as f:
+def record(serial, pkgs, fn="suspended.txt", backup=None):
+    """记进快照，供 unsuspend 还原。写前去重：同名包反复挂起/关闭时文件不再越写越长
+    （读侧 sorted(set(...)) 一直有兜底，这里只是别让文件先胀起来）。
+    backup：调用方已经定位过快照目录就传进来，免得再打一轮 info()。"""
+    path = os.path.join(backup if backup is not None else latest_backup(serial), fn)
+    seen = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            seen.update(line.strip() for line in f)
+    with open(path, "a", encoding="utf-8") as f:
         for p in pkgs:
-            f.write(p + "\n")
+            if p not in seen:
+                f.write(p + "\n")
+                seen.add(p)
 
 
 DEV_REMINDER = """
@@ -449,7 +469,7 @@ def cmd_check(serial, rest):
     for p in ad_packages(i["brand"]):
         exists = "package:" in sh(serial, f"pm path {p}")
         print(f"  广告包 {p}：{'未安装' if not exists else ('已挂起' if suspended(serial, p) else '未挂起')}")
-    for q in quickapps(serial):
+    for q in quickapps(serial, with_usage=False):
         print(f"  快应用 {q['pkg']}（{q['name']}）：{'已关闭' if q['closed'] else '未关闭'}"
               f"（{'系统服务开关' if q['method'] == 'setting' else '挂起状态'}）")
     print(f"插电常亮：{sh(serial, 'settings get global stay_on_while_plugged_in')}")
@@ -533,29 +553,28 @@ def cmd_suspend(serial, rest):
     bad = [p for p in rest if p in NEVER]
     if bad:
         return fail(f"这些包挂了会坏功能，不挂：{bad}")
-    d = latest_backup(serial)
+    d = latest_backup(serial)        # 动手前先有改动前的快照目录
     failures = 0
-    with open(os.path.join(d, "suspended.txt"), "a", encoding="utf-8") as f:
-        for p in rest:
-            out = sh_all(serial, f"pm suspend --user 0 {p}")
-            if suspended(serial, p):
-                f.write(p + "\n")
-                extra = ""
-                if p == MSA:
-                    sh(serial, f"am force-stop {p}")
-                    network = msa_net(serial, False)
-                    if network["ok"]:
-                        extra = "，已禁止联网"
-                    elif not network["supported"]:
-                        # 系统没有这个接口，用户也改不了：挂起已完成，不算失败（错误日志 10-27，7 份报告）
-                        extra = "（这台手机的系统没有 msa 断网接口，只做了挂起）"
-                    else:
-                        extra = "；部分完成：" + network["reason"]
-                        failures += 1
-                print(f"  {p}：已挂起{extra}")
-            else:
-                failures += 1
-                print(f"  {p}：挂起失败（{(out.splitlines() or ['系统没给原因'])[-1][:160]}）")
+    for p in rest:
+        out = sh_all(serial, f"pm suspend --user 0 {p}")
+        if suspended(serial, p):
+            record(serial, [p], backup=d)
+            extra = ""
+            if p == MSA:
+                sh(serial, f"am force-stop {p}")
+                network = msa_net(serial, False)
+                if network["ok"]:
+                    extra = "，已禁止联网"
+                elif not network["supported"]:
+                    # 系统没有这个接口，用户也改不了：挂起已完成，不算失败（错误日志 10-27，7 份报告）
+                    extra = "（这台手机的系统没有 msa 断网接口，只做了挂起）"
+                else:
+                    extra = "；部分完成：" + network["reason"]
+                    failures += 1
+            print(f"  {p}：已挂起{extra}")
+        else:
+            failures += 1
+            print(f"  {p}：挂起失败（{(out.splitlines() or ['系统没给原因'])[-1][:160]}）")
     return 1 if failures else 0
 
 
@@ -583,7 +602,7 @@ def cmd_unsuspend(serial, rest):
 
 def cmd_quickapp(serial, rest):
     sub = rest[0] if rest else "check"
-    qs = quickapps(serial)
+    qs = quickapps(serial, with_usage=(sub == "check"))
     if not qs:
         print("没有检测到快应用组件。"); return 0
     if sub == "check":
@@ -600,16 +619,17 @@ def cmd_quickapp(serial, rest):
                   f"{'近期打开过 %d 次' % q['used'] if q['used'] else '近期没打开过'}"
                   f"{note}")
         h = sh(serial, "pm query-activities --brief -a android.intent.action.VIEW -d hap://app/x")
-        who = re.findall(r"^\s*(\S+/\S+)$", h, re.M)
+        who = list(dict.fromkeys(re.findall(r"^\s*(\S+/\S+)$", h, re.M)))
+        handlers = "、".join(who)
         if [q for q in qs if not q["closed"] and not q["keep"]]:
             if who:
-                print(f"hap:// 链接由 {who[0]} 接管：网页或 App 里的广告可以用这类链接跳进快应用。")
+                print(f"hap:// 链接由 {handlers} 接管：网页或 App 里的广告可以用这类链接跳进快应用。")
             print("关闭：python3 tool/run.py -s %s quickapp off（要机主同意，可还原）" % serial)
         else:
             print("可挂起的快应用组件已关闭（保留项除外）；恢复：quickapp on")
             if who:
                 # 保留平台就等于留着 hap:// 入口，不能写成广告已拦下
-                print(f"hap:// 链接仍由 {who[0]} 接管（保留项）：广告仍可能跳进快应用。")
+                print(f"hap:// 链接仍由 {handlers} 接管（保留项）：广告仍可能跳进快应用。")
         return 0
     if sub == "off":
         todo = [q["pkg"] for q in qs if not q["closed"] and q["method"] == "suspend" and not q["keep"]]
@@ -630,7 +650,7 @@ def cmd_quickapp(serial, rest):
                 sh(serial, f"am force-stop --user 0 {p}")
         done = [p for p in todo if suspended(serial, p)]
         record(serial, done)
-        after = quickapps(serial)
+        after = quickapps(serial, with_usage=False)
         bad = []
         for q in after:
             if q["keep"]:
