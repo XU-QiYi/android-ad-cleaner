@@ -21,8 +21,9 @@ class BaselineTests(unittest.TestCase):
 
     def test_unknown_sha_fails_without_leaving_a_worktree(self):
         before = self.worktrees()
+        # 驱动自己把 stdio 转成 UTF-8；这里只负责按 UTF-8 解码（Windows 管道默认 cp1252）
         proc = subprocess.run([sys.executable, str(SCRIPT), "--baseline", "0" * 40],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("找不到提交", proc.stderr)     # 守卫：走到了「拉基线失败」这一支
         self.assertEqual(self.worktrees(), before)
