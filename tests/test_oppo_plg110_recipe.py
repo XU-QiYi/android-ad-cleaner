@@ -1,7 +1,6 @@
 """PLG110（OPPO Find X9 Pro）：未确认页面/控件时不点击，并保留服务类开关。"""
 import contextlib
 import io
-import os
 from pathlib import Path
 import sys
 import unittest
