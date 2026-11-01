@@ -9,6 +9,12 @@ SCRIPT = ROOT / "tests" / "compare_phone_state.py"
 
 
 class BaselineTests(unittest.TestCase):
+    def setUp(self):
+        probe = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=ROOT,
+                               capture_output=True, text=True)
+        if probe.returncode:
+            self.skipTest("git archive 出来的干净副本没有 .git；这条只在 git 工作区里跑")
+
     def worktrees(self):
         return subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=ROOT,
                               capture_output=True, text=True, check=True).stdout
