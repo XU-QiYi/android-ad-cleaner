@@ -37,4 +37,16 @@ python3 tool/run.py -s <序列号> finish
 | 小布建议 | 核对内容资讯服务 | 资讯服务、赛事服务等默认已未开启，保留出行、生活、日程、天气等实用卡片 |
 | 主题商店 | 检查服务模式 | 处于主题基础服务模式，无广告且不误点完整协议 |
 
-通知渠道、广告组件和快应用仍按 `AGENTS.md` 的独立流程处理，不包含在本脚本里。挂起状态不保证后台进程不会被系统重新拉起。
+## 选做项实测验证（通知渠道、组件挂起与快应用）
+
+通知渠道、广告组件和快应用仍按 `AGENTS.md` 的独立流程处理，需经机主明确同意后执行：
+
+1. **广告包挂起**：
+   - 执行 `python3 tool/run.py -s <序列号> suspend com.opos.ads`
+   - 实测：`com.opos.ads` 成功挂起并回读为已挂起状态。还原方式：`python3 tool/run.py -s <序列号> unsuspend com.opos.ads`。
+2. **快应用组件安全关闭**：
+   - 执行 `python3 tool/run.py -s <序列号> quickapp off`
+   - 实测：快应用本地服务 `com.oppo.instant.local.service` 成功关闭（挂起状态），按规则严格保留快应用平台 `com.nearme.instant.platform`。负一屏快递卡片详情打开与使用正常。还原方式：`python3 tool/run.py -s <序列号> quickapp on`。
+3. **营销通知渠道逐项关闭**：
+   - 执行 `python3 tool/run.py -s <序列号> chan-off <清单>`
+   - 实测：共 60 个营销推广类渠道（包括内容与营销、活动优惠、精彩推荐、资讯推送等）在 420 秒内逐一打开设置页回读并关闭，结尾复查确认营销渠道仍开着为 0 个。全部系统通知总开关及业务核心通知保持未变。

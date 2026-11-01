@@ -69,6 +69,13 @@ class Plg110RecipeTests(unittest.TestCase):
         self.assertTrue(choices["显示轮播推荐"][0])
         self.assertFalse(choices["不显示轮播推荐"][0])
 
+    def test_oppo_optional_actions_and_safety_guards(self):
+        self.assertEqual(run.FAMILY.get("oppo"), "oppo")
+        self.assertIn("com.opos.ads", run.AD_PKGS["oppo"])
+        self.assertIn("com.nearme.instant.platform", run.QUICKAPP_KEEP)
+        self.assertIn("com.heytap.quicksearchbox", run.NEVER)
+        self.assertIn("com.coloros.assistantscreen", run.NEVER)
+
 
 if __name__ == "__main__":
     unittest.main()
