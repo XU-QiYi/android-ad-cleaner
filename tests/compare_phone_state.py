@@ -29,17 +29,27 @@ TWO_WINDOWS = '''<hierarchy rotation="0">
   <node package="com.android.settings" text="广告" bounds="[60,540][400,600]"/>
 </hierarchy>'''
 
-# 一个普通广告开关（安全模式不该碰）+ 一个保护类开关（安全模式照样要拨开）
-SAFE_MODE_PAGE = '''<hierarchy rotation="0">
-  <node package="com.android.settings" clickable="true" bounds="[0,300][1080,380]">
-    <node text="个性化推荐" bounds="[60,310][400,370]"/>
-    <node class="android.widget.Switch" checkable="true" checked="true" bounds="[950,300][1060,380]"/>
-  </node>
-  <node package="com.android.settings" clickable="true" bounds="[0,500][1080,580]">
-    <node text="限制广告跟踪" bounds="[60,510][400,570]"/>
-    <node class="android.widget.Switch" checkable="true" checked="false" bounds="[950,500][1060,580]"/>
-  </node>
-</hierarchy>'''
+def switch_page(w, h):
+    """按屏宽高参数化的开关页：两条普通、两条保护、两条带外，两种尺寸下都可达。
+
+    守卫按标题回认点击坐标，所以这里同时交回每行开关的中心点。
+    """
+    rows = [("顶部广告", True, 0.02), ("广告推荐", True, 0.20), ("猜你喜欢", False, 0.35),
+            ("限制广告跟踪", False, 0.50), ("防止广告追踪", True, 0.65), ("底部广告", True, 0.985)]
+    row_h = max(12, h // 60)
+    nodes, coords = [], {}
+    for title, checked, ratio in rows:
+        y0 = int(h * ratio)
+        y1 = y0 + row_h
+        l, r = int(w * 0.88), int(w * 0.98)
+        nodes.append(
+            f'  <node package="com.android.settings" clickable="true" bounds="[0,{y0}][{w},{y1}]">\n'
+            f'    <node text="{title}" bounds="[{int(w * 0.05)},{y0 + 2}][{int(w * 0.4)},{y1 - 2}]"/>\n'
+            f'    <node class="android.widget.Switch" checkable="true" checked="{str(checked).lower()}"'
+            f' bounds="[{l},{y0}][{r},{y1}]"/>\n'
+            f'  </node>')
+        coords[title] = ((l + r) // 2, (y0 + y1) // 2)
+    return '<hierarchy rotation="0">\n' + "\n".join(nodes) + '\n</hierarchy>', coords
 
 
 def dump(tool_dir):
@@ -90,21 +100,26 @@ def dump(tool_dir):
 
     def off():
         out = []
-        for safe in (True, False):
-            clock = fixtures.Clock()
-            fixtures.install_clock(fast, clock)
-            lines = []
-            p = fixtures.fake_phone(clock=clock, stages=[(0.0, SAFE_MODE_PAGE)], fast_mod=fast,
-                                    say=lines.append)
-            p.safe_mode = safe
-            if safe:
-                os.environ["AAC_REF"] = "1"      # 改前靠环境变量；改后忽略它
-            else:
-                os.environ.pop("AAC_REF", None)
-            done = p.off(page="系统·广告服务")
-            os.environ.pop("AAC_REF", None)
-            out.append({"id": f"safe={safe}", "done": done, "clicks": clock.clicks,
-                        "changed": p.changed, "lines": lines})
+        for size in SIZES:
+            page, _ = switch_page(*size)
+            for safe in (True, False):
+                for only in (None, ["运营任务"]):
+                    clock = fixtures.Clock()
+                    fixtures.install_clock(fast, clock)
+                    lines, clicked = [], []
+                    p = fixtures.fake_phone(clock=clock, size=size, stages=[(0.0, page)], fast_mod=fast,
+                                            say=lines.append)
+                    p.safe_mode = safe
+                    p.click = lambda x, y, _c=clock, _a=clicked: (_c.click(), _a.append((x, y)))
+                    if safe:
+                        os.environ["AAC_REF"] = "1"      # 更早的实现靠环境变量；当前两版都忽略它
+                    else:
+                        os.environ.pop("AAC_REF", None)
+                    done = p.off(page="系统·广告服务", only=only)
+                    os.environ.pop("AAC_REF", None)
+                    out.append({"id": f"{size[0]}x{size[1]}|safe={safe}|only={only is not None}",
+                                "done": done, "clicks": clock.clicks, "clicked": clicked,
+                                "changed": p.changed, "lines": lines})
         return out
 
     return {"texts": texts(), "entries": entries(), "off": off()}
@@ -116,6 +131,28 @@ def collect(tool_dir):
     if proc.returncode:
         sys.exit(f"跑不通 {tool_dir}：\n{proc.stderr}")
     return json.loads(proc.stdout)
+
+
+def off_guards(records):
+    """每个场景断言它自己那条分支：点到了哪些标题、带外行一次都不点、重试真的补点。"""
+    bad = 0
+    for rec in records:
+        size_s, safe_s, only_s = rec["id"].split("|")
+        w, h = map(int, size_s.split("x"))
+        _, coords = switch_page(w, h)
+        by_xy = {xy: title for title, xy in coords.items()}
+        clicked = [by_xy.get(tuple(xy)) for xy in rec["clicked"]]
+        got = set(clicked)
+        safe, only = safe_s == "safe=True", only_s == "only=True"
+        expected = {"限制广告跟踪"} if (safe or only) else {"广告推荐", "限制广告跟踪"}
+        ok = (got == expected
+              and rec["clicks"] > len(expected)          # 静态页回读不变，重试必须补点
+              and "顶部广告" not in got and "底部广告" not in got
+              and None not in got)
+        bad += 0 if ok else 1
+        print(f"守卫：{rec['id']} 点到 {sorted(x for x in got if x)}，共 {rec['clicks']} 次，"
+              f"{'ok' if ok else 'FAIL'}")
+    return bad
 
 
 def main():
@@ -139,9 +176,8 @@ def main():
     e = {x["id"]: x["got"] for x in after["entries"]}
     filtered = sum(1 for k, v in e.items() if k.rsplit("|", 1)[1] == "com.android.settings"
                    and v != e[k.rsplit("|", 1)[0] + "|"])
-    clicks = {x["id"]: x["clicks"] for x in after["off"]}
-    print(f"守卫：读屏策略改变输出的组数 {flipped}，包名过滤改变输出的页数 {filtered}，"
-          f"安全模式点击 {clicks.get('safe=True')} vs {clicks.get('safe=False')}")
+    print(f"守卫：读屏策略改变输出的组数 {flipped}，包名过滤改变输出的页数 {filtered}")
+    bad += off_guards(after["off"])
     sys.exit(1 if bad else 0)
 
 

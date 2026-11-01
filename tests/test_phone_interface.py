@@ -5,7 +5,9 @@
 """
 import sys
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tool"))
@@ -133,6 +135,122 @@ class SafeModeTests(unittest.TestCase):
         p.off(page="系统·广告服务")
         self.assertGreater(self.clock.clicks, 0)                      # 同一页在非安全模式下会点
         self.assertFalse(any("安全模式不做整页全关" in line for line in self.lines))
+
+
+class OffDriverTests(unittest.TestCase):
+    """off() 的点击节奏、回读重试、离页与记账；策略面在 tests/test_switch_plan.py。"""
+
+    def phone(self, reads, size=(1080, 2340)):
+        p = phone_stub("S")
+        p.W, p.H = size
+        p.tree = Mock(return_value=ET.fromstring("<hierarchy/>"))
+        p.switches = Mock(side_effect=reads)
+        p.focus = Mock(return_value="app/settings")
+        p.click = Mock()
+        p.confirm = Mock(return_value=None)
+        p.scroll_more = Mock(return_value=False)
+        p.say = Mock()
+        p.back = Mock()
+        return p
+
+    def test_first_target_is_clicked_alone_then_the_rest_follow(self):
+        rows = [("广告甲", True, (500, 800)), ("广告乙", True, (500, 1000))]
+        after = [("广告甲", False, (500, 800)), ("广告乙", False, (500, 1000))]
+        p = self.phone([rows, rows, after, after, after])
+        with patch.object(fast, "time", Clock(click_cost=0.0)):
+            done = p.off(page="页")
+        self.assertEqual([c.args for c in p.click.call_args_list], [(500, 800), (500, 1000)])
+        self.assertEqual(p.confirm.call_count, 2)   # 首击单独确认一次 + 收尾统一确认
+        self.assertEqual(p.focus.call_count, 2)     # start + 首击后的离页检查，第二下不再检查
+        self.assertEqual(done, 2)
+
+    def test_a_confirmation_makes_every_following_click_slow(self):
+        rows = [("广告甲", True, (500, 800)), ("广告乙", True, (500, 1000))]
+        after = [("广告甲", False, (500, 800)), ("广告乙", False, (500, 1000))]
+        p = self.phone([rows, rows, after, after, after])
+        p.confirm = Mock(return_value="确定")       # 第一个目标弹出确认框
+        with patch.object(fast, "time", Clock(click_cost=0.0)):
+            p.off(page="页")
+        self.assertEqual([c.args for c in p.click.call_args_list], [(500, 800), (500, 1000)])
+        self.assertEqual(p.confirm.call_count, 3)   # 首击 + 第二个目标各确认一次，收尾再一次
+        self.assertEqual(p.focus.call_count, 1)     # 确认分支不再走离页检查
+
+    def test_non_slow_targets_are_clicked_with_a_short_pause_after_each(self):
+        rows = [("广告甲", True, (500, 800)), ("广告乙", True, (500, 1000)), ("广告丙", True, (500, 1200))]
+        after = [(t, False, xy) for t, _, xy in rows]
+        p = self.phone([rows, rows, after, after, after])
+        clock = Clock(click_cost=0.0)
+        moments = []
+        p.click = Mock(side_effect=lambda *a: moments.append(clock.t))
+        with patch.object(fast, "time", clock):
+            p.off(page="页")
+        self.assertEqual(moments[:2], [0.0, 0.0])                  # 首击与第二下之间不等确认
+        self.assertEqual(round(moments[2] - moments[1], 2), 0.06)  # 非 slow 的点击后停 0.06
+
+    def test_a_wrong_readback_retries_at_the_fresh_coordinates(self):
+        rows = [("广告推荐", True, (500, 800))]
+        still = [("广告推荐", True, (620, 900))]    # 页面重排：坐标变了，状态还没变
+        fixed = [("广告推荐", False, (620, 900))]
+        p = self.phone([rows, rows, still, still, fixed])
+        with patch.object(fast, "time", Clock()):
+            done = p.off(page="页")
+        self.assertEqual([c.args for c in p.click.call_args_list], [(500, 800), (620, 900)])
+        self.assertEqual(done, 1)
+        self.assertEqual(p.changed, [("页", "广告推荐")])
+
+    def test_three_failed_readbacks_are_reported_as_not_closed(self):
+        rows = [("广告推荐", True, (500, 800))]
+        p = self.phone([rows, rows, rows] + [[]] * 4)
+        with patch.object(fast, "time", Clock()):
+            done = p.off(page="页")
+        p.say.assert_any_call("  ✗ 关不掉 广告推荐")
+        p.click.assert_called_once_with(500, 800)   # 节点消失后不沿用旧坐标重拨
+        self.assertEqual((done, p.changed), (0, []))
+
+    def test_leaving_the_page_after_the_first_click_stops_the_segment(self):
+        rows = [("广告甲", True, (500, 800)), ("广告乙", True, (500, 1000))]
+        p = self.phone([rows, rows])
+        p.focus = Mock(side_effect=["app/settings", "other/app", "other/app"])
+        with patch.object(fast, "time", Clock()):
+            done = p.off(page="页")
+        self.assertEqual(done, 0)
+        p.click.assert_called_once_with(500, 800)
+        p.back.assert_called_once_with()
+        p.scroll_more.assert_not_called()
+        p.say.assert_any_call("  ! 页面变了（other/app），停")
+
+    def test_the_summary_counts_checked_and_adjusted(self):
+        rows = [("广告甲", True, (500, 800)), ("广告乙", False, (500, 1000))]
+        after = [("广告甲", False, (500, 800)), ("广告乙", False, (500, 1000))]
+        p = self.phone([rows, rows, after, after, after])
+        with patch.object(fast, "time", Clock()):
+            p.off(page="系统·广告服务")
+        p.say.assert_any_call("  · 系统·广告服务：核对 2 项，调整 1 项")
+
+    def test_a_protection_switch_is_reported_as_opened(self):
+        rows = [("限制广告跟踪", False, (500, 800))]
+        after = [("限制广告跟踪", True, (500, 800))]
+        p = self.phone([rows, rows, after, after, after])
+        with patch.object(fast, "time", Clock()):
+            done = p.off(page="页")
+        p.say.assert_any_call("  开（保护类开关） 限制广告跟踪")
+        self.assertEqual((done, p.changed), (1, [("页", "限制广告跟踪")]))
+
+    def test_a_page_of_already_closed_switches_is_checked_but_not_adjusted(self):
+        rows = [("个性化推荐", False, (500, 800))]
+        p = self.phone([rows, rows])
+        with patch.object(fast, "time", Clock()):
+            p.off(page="页")
+        p.click.assert_not_called()
+        p.say.assert_any_call("  · 页：核对 1 项，调整 0 项")
+
+    def test_a_page_without_a_named_target_says_not_found(self):
+        rows = [("关闭推送", True, (500, 800))]
+        p = self.phone([rows, rows])
+        with patch.object(fast, "time", Clock()):
+            p.off(page="页")
+        p.click.assert_not_called()
+        p.say.assert_any_call("  · 页：核对 0 项，调整 0 项（本页未找到目标开关）")
 
 
 if __name__ == "__main__":

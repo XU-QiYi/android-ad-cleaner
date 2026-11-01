@@ -12,6 +12,7 @@
 在脚本里：from fast import Phone
 """
 import os, re, sys, time, xml.etree.ElementTree as ET
+from dataclasses import dataclass
 for _st in (sys.stdout, sys.stderr):
     try:
         _st.reconfigure(encoding="utf-8", errors="replace")   # Windows 控制台默认不是 UTF-8
@@ -76,6 +77,42 @@ def want_state(title):
     if NEG_PREFIX.search(title or ""):
         return True if AD_WORDS.search(title) else None
     return False
+
+
+@dataclass(frozen=True)
+class SwitchPlan:
+    """一页的拨动计划：要拨的目标、核对过的开关、安全模式放过的开关。"""
+    targets: tuple
+    checked: frozenset
+    kept: frozenset
+
+
+def plan_switches(rows, keep=(), only=None, safe_mode=False, *, screen_h):
+    """这一页该拨哪些开关。rows 是 `Phone.switches()` 的输出；函数不读屏、不点击。
+
+    targets 只含需要点击的行；checked 是过了筛选的标题，含已在目标态与落在屏带外的；
+    kept 是安全模式放过的普通开关。screen_h 无默认值：带过滤是这一页几何的一部分。"""
+    targets, checked, kept = [], set(), set()
+    for title, state, xy in rows:
+        if not title:
+            continue
+        want = want_state(title)
+        if want is None:
+            continue
+        if any(k in title for k in keep):
+            continue
+        if only is not None and not any(k in title for k in only) and not (want and TRACK_WORDS.search(title)):
+            continue                              # 「限制广告跟踪」这类保护开关：不在名单里也要打开
+        if safe_mode and only is None and not want:
+            kept.add(title)
+            continue                              # 参考脚本（同品牌别的机型录的）：不做整页全关
+        checked.add(title)
+        if state == want:
+            continue
+        if xy[1] < screen_h * 0.08 or xy[1] > screen_h * 0.985:
+            continue
+        targets.append((title, xy, want))
+    return SwitchPlan(tuple(targets), frozenset(checked), frozenset(kept))
 
 
 def _shell_transport(shell):
@@ -663,26 +700,10 @@ class Phone:
         done, slow, checked, kept = 0, False, set(), set()
         for _ in range(max_screens):
             root = self.tree()
-            targets = []
-            for t, c, xy in self.switches(root):
-                if not t:
-                    continue
-                want = want_state(t)
-                if want is None:
-                    continue
-                if any(k in t for k in keep):
-                    continue
-                if only is not None and not any(k in t for k in only) and not (want and TRACK_WORDS.search(t)):
-                    continue                              # 「限制广告跟踪」这类保护开关：不在名单里也要打开
-                if self.safe_mode and only is None and not want:
-                    kept.add(t)
-                    continue                              # 参考脚本（同品牌别的机型录的）：不做整页全关
-                checked.add(t)
-                if c == want:
-                    continue
-                if xy[1] < self.H * 0.08 or xy[1] > self.H * 0.985:
-                    continue
-                targets.append((t, xy, want))
+            plan = plan_switches(self.switches(root), keep, only, self.safe_mode, screen_h=self.H)
+            checked |= plan.checked
+            kept |= plan.kept
+            targets = plan.targets
             for i, (t, xy, _) in enumerate(targets):
                 self.click(*xy)
                 if i == 0 or slow:

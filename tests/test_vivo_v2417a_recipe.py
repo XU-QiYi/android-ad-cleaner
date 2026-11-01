@@ -84,6 +84,11 @@ class VivoV2417ARecipeTests(unittest.TestCase):
             scope["close_named"](["个性化广告"], "系统广告")
         self.assertEqual(states, {"个性化广告": False, "个性化广告推荐": True})
         p.click.assert_called_once_with(1, 600)
+        p.off.assert_called_once()
+        p.switches.assert_called()
+        p.focus.assert_called()
+        p.confirm.assert_called()
+        p.scroll_more.assert_called_once_with()
 
     def test_store_handles_confirmation_and_state_in_title_without_reopening(self):
         p = phone_mock()
