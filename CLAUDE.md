@@ -6,7 +6,7 @@
 
 ## 开发
 
-- 回归：`python -m unittest discover -s tests`；本机用仓库根的 `.venv/bin/python`（系统 python 缺 adbutils，会报一串 ModuleNotFoundError）。只装 `requirements.txt` 就够，不需要 pywebview / pillow。并行会话在各自的 worktree 里干活时，那个目录没有 `.venv`，用主副本 `.venv/bin/python` 的绝对路径；Read/Edit 也一律用该 worktree 的绝对路径。
+- 回归：`python -m unittest discover -s tests`；本机用仓库根的 `.venv/bin/python`（系统 python 缺 adbutils，会报一串 ModuleNotFoundError）。只装 `requirements.txt` 就够，不需要 pywebview / pillow。并行会话在各自的 worktree 里干活时，那个目录没有 `.venv`，用主副本 `.venv/bin/python` 的绝对路径；Read/Edit 也一律用该 worktree 的绝对路径。只跑一个文件时加 `PYTHONPATH=tests`：`PYTHONPATH=tests python -m unittest tests.test_row`（`tests/` 里的用例按顶层模块 import `fixtures`）。
 - 本机 `.venv` 是 3.15，CI 是 3.12，而解释器会改写部分输出（3.13 起编译器剥掉文档字符串的公共缩进，异常 repr、argparse 帮助同理）。推送前用 CI 那一版再跑一套：`uv run --python 3.12 --with-requirements requirements.txt python -m unittest discover -s tests`（首次装环境约 30 秒）。
 - 数基线总数用干净副本：先 `git rev-parse origin/main` 记下 `<sha>`，再 `git archive <sha> | tar -x -C /tmp/x`，在 `/tmp/x` 里跑同一套。主副本里可能躺着别的会话没提交的用例。
 - 改动面与审查对比用分支基点的固定 SHA（`git merge-base HEAD origin/main` 的结果，`git diff <sha>`），不用 `origin/main` 尖端——并行会话会推进它。
