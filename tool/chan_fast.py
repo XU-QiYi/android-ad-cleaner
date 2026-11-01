@@ -352,10 +352,12 @@ class Reached:
 
 @dataclass(frozen=True)
 class Unreached:
-    """没到达：卡在哪一环、这一行为什么没认出、页面结构摘要。text 就是给用户看的那一段。"""
+    """没到达：卡在哪一环、这一行为什么没认出、页面结构摘要。text 就是给用户看的那一段。
+    no_row 是结构信号不是文案：这一屏除了总开关再没有别的开关，页面上确实没有这个渠道的行。"""
     stage: str = ""
     why: str = ""
     hint: str = ""
+    no_row: bool = False
 
     @property
     def text(self):
@@ -380,6 +382,7 @@ class ChannelPage:
     def __init__(self, p, name, pk="", cid="", vivo_app=None):
         self.p, self.name, self.pk, self.cid, self.vivo_app = p, name, pk, cid, vivo_app
         self.stage, self.why, self.raw_focus = "", "", ""
+        self.no_row = False
 
     # ---------- 认页与认行 ----------
     def _focus(self):
@@ -554,11 +557,11 @@ class ChannelPage:
             root = p.tree()
             return True if not titled(p, root, name) else None
 
-        if not wait.until(app_page_shown, tries=15, poll=POLL,
-                          now=time.monotonic, sleep=time.sleep):
-            if not self._focus():
-                self.stage = self._unopened_stage()
-                return None
+        shown = wait.until(app_page_shown, tries=15, poll=POLL,
+                           now=time.monotonic, sleep=time.sleep)
+        if not shown and not self._focus():
+            self.stage = self._unopened_stage()
+            return None
         self.stage = "应用通知页里没找到这一行"
         for _ in range(9):
             if p.locked():
@@ -614,6 +617,10 @@ class ChannelPage:
                 if p.sig() == before:
                     break                     # 滑了没动：列表到底了，再滑也是空转
             root = None
+        # 「没认出行」不等于「页面上没有这一行」：渠道名写在 CheckBox 上（#427）、own() 拿不到行容器、
+        # 页面没标可滚动或翻页到上限时，行还在页面上而这轮没认出来。只有这一屏除了总开关再没有别的开关
+        # （应用通知整体关闭时的样子）才敢断言没有这一行。
+        self.no_row = bool(shown) and len(p.switches(p.tree())) == 1
         return None
 
     def open(self, rounds=12):
@@ -630,7 +637,7 @@ class ChannelPage:
             switch = self._enter_app_page()
         if switch:
             return Reached(switch)
-        return Unreached(self.stage, self.why, self._hint())
+        return Unreached(self.stage, self.why, self._hint(), self.no_row)
 
 
 def _switch_of(reached):
@@ -693,15 +700,37 @@ def page_hint(p, name):
 
 
 def notifications_denied(p, pk):
-    """安卓 13 起应用通知总开关是 POST_NOTIFICATIONS 权限。有的系统 dumpsys notification 看不出来：
+    """应用通知是否被系统整体关闭。安卓 13 起看 POST_NOTIFICATIONS 权限；更早的系统没有这个权限，
+    只有 appops 能问（华为 HarmonyOS 4.2 / 安卓 12，#426）。有的系统 dumpsys notification 看不出来：
     渠道页的开关显示「关」，渠道记录仍是「开」（三星 9 个、vivo 2 个，错误日志 10-29；华为 #241 同样现象）。"""
     try:
         # 不加 grep -m：提前退出会让 dumpsys 收到 SIGPIPE，u2 判「shell output invalid」（#205）
         out = p.d.shell(f"dumpsys package {shlex.quote(pk)} | grep 'POST_NOTIFICATIONS: granted='"
                         " | sed -n '1,3p'").output
     except Exception:
+        out = ""
+    if isinstance(out, str):
+        if "POST_NOTIFICATIONS: granted=true" in out:
+            return False                # 这个权限就代表着总开关，它开着就不用再问 appops
+        if "POST_NOTIFICATIONS: granted=false" in out:
+            return True
+    return appops_denied(p, pk)
+
+
+# cmd appops 的 POST_NOTIFICATION 模式里算「关掉」的那两个；default / allow / foreground / 读不出来都按「没关」处理
+APPOPS_DENIED = ("ignore", "deny")
+
+
+def appops_denied(p, pk):
+    """没装 POST_NOTIFICATIONS 权限的系统（安卓 12 及以前）从 appops 读同一个总开关。"""
+    try:
+        text = p.d.shell(f"cmd appops get {shlex.quote(pk)} POST_NOTIFICATION").output
+    except Exception:
         return False
-    return isinstance(out, str) and "POST_NOTIFICATIONS: granted=false" in out and "POST_NOTIFICATIONS: granted=true" not in out
+    if not isinstance(text, str):
+        return False
+    match = re.search(r"(?m)^\s*POST_NOTIFICATION:\s*([A-Za-z_]+)", text)
+    return bool(match) and match.group(1).lower() in APPOPS_DENIED
 
 
 def disabled_at(p, xy):
@@ -729,6 +758,9 @@ def toggle(p, pk, cid, want_on, name="", allowed=()):
         page = ChannelPage(p, name, pk, cid)
         reached = page.open()
         if not isinstance(reached, Reached):
+            # 应用通知整体关着时，应用通知页只列总开关：这个渠道本来就不会出现在页面上，不是没认出（#426）
+            if not want_on and reached.no_row and notifications_denied(p, pk):
+                return Outcome(APP_DENIED)
             # 只记 Activity、卡在哪一环和开关数量，不记页面内容；适配新系统靠它。
             return Outcome(NOT_CONFIRMED,
                            f"未确认「{name}」渠道页及通知开关，跳过（停在 {p.focus() or '未知页面'}；{reached.text}）")
