@@ -91,6 +91,10 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(p.off(only=["广告推荐"]), 0)
         self.assertEqual(p.changed, [])
         p.click.assert_called_once_with(1000, 500)
+        p.confirm.assert_called()
+        p.focus.assert_called()
+        p.tree.assert_called_once_with()
+        p.scroll_more.assert_called_once_with()
 
 
 class InputTests(unittest.TestCase):
