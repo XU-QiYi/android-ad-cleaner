@@ -345,6 +345,8 @@ def _():
     p.start("com.nearme.gamecenter")
     time.sleep(1.2)
     p.dismiss()
+    # 弹窗压在带开关/滚动列表的页面上：p.dismiss() 只认 ✕ 图标、不点名文字按钮（见 fast.dismiss 的守卫），
+    # 所以开屏与引导弹窗按页面实见的按钮逐个点名。
     for _ in range(4):
         for dismiss_btn in ("取消", "我知道了", "不再提醒", "忽略", "跳过"):
             if p.find(dismiss_btn, exact=True):
