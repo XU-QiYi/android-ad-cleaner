@@ -119,7 +119,7 @@
 
 PMX110 / ColorOS 17 上逐个单独挂起实测（Issue #335，2026-10-30）。
 
-用电脑跑：`run.py quickapp` 检测，`quickapp off` 关闭（保留 `platform`，广告仍可能通过 `hap://` 跳进快应用）。见 [07-快应用](../07-快应用.md)。
+用电脑跑：`run.py quickapp` 检测，`quickapp off` 关闭（保留 `platform`，广告仍可能通过 `hap://` 跳进快应用）。见 [07-快应用](../07-快应用.md)。CLI 提示：`quickapp off` 会列出跳过的保留包，`check` 对保留包标「未关闭（保留：…）」；`hap://` 冲突提示一次列出全部应答组件（不逐个重问）。
 
 - ⚠️ 不要挂 `com.heytap.quicksearchbox`（下拉搜索）和 `com.coloros.assistantscreen`（负一屏）。
 

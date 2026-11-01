@@ -626,8 +626,8 @@ class PackageListTests(unittest.TestCase):
             self.assertIn("does not have permission", run.pkg_list("test", "--user 0 -d"))
 
     def test_manually_disabled_quickapp_is_closed_via_cmd_package(self):
-        with patch.object(run, "installed", side_effect=lambda _s, pkg: pkg == "com.miui.hybrid"), \
-             patch.object(run, "quickapp_switch", return_value=None), \
+        # 装机判定走批量清单（pm list → cmd package 兜底），不再逐包 pm path
+        with patch.object(run, "quickapp_switch", return_value=None), \
              patch.object(run, "suspended", return_value=False), \
              patch.object(run, "sh", side_effect=lambda _s, c: "package:com.miui.hybrid" if c.startswith("cmd package") else ""):
             entries = run.quickapps("test-device")

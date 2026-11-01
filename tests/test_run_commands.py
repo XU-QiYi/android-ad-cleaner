@@ -1,7 +1,8 @@
-"""run.py 的命令接口，以及「只是搬家」的对拍。
+"""run.py 的命令接口、多余往返的守卫，以及「只是搬家」的对拍。
 
-两件事在这里守着：
+三件事在这里守着：
 - 每条命令是一个 handler，进程内调用拿退出码；退出码与错误渲染只在 main() 的出口（ADR-0005）。
+- 多余往返与冗余写入不许回来（usagestats 白拉、逐包 pm path、wm size 双读、suspended.txt 重复行、hap:// 只报第一个应答组件）。
 - 对外可观察的行为（退出码 / stdout / stderr）与改动前逐字节相同：基线
   `tests/baselines/run_cli.json` 由 `tests/make_run_cli_baseline.py` 在 `git archive e319126`
   的干净副本上生成，喂的是同一份假 adb（`tests/run_cli_cases.py`）。
@@ -212,6 +213,98 @@ class HandlerInterfaceTests(unittest.TestCase):
                         if isinstance(node, ast.Name) and node.id == "SystemExit"]
         self.assertEqual(exits, [])
         self.assertEqual(len(system_exits), 1)
+
+
+class RoundTripTests(unittest.TestCase):
+    """多余往返与冗余写入（#335 复测时发现）：每条去掉对应优化即红。"""
+
+    PKGS = ("com.nearme.instant.platform", "com.oppo.instant.local.service", "com.nearme.instant.card")
+
+    def drive(self, argv, listed=True):
+        """跑一条 quickapp 子命令，返回 (输出, 假 shell 收到的命令, 挂起集合)。"""
+        events, state = [], set()
+
+        def shell(_s, cmd):
+            events.append(cmd)
+            if listed and cmd.startswith("pm list packages") and "-d" not in cmd:
+                return "".join(f"package:{p}\n" for p in self.PKGS)
+            return ""
+
+        def suspend(_s, cmd):
+            events.append(cmd)
+            if cmd.startswith("pm suspend --user 0 "):
+                state.add(cmd.rsplit(" ", 1)[-1])
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(run, "sh", side_effect=shell), \
+             patch.object(run, "sh_all", side_effect=suspend), \
+             patch.object(run, "quickapp_switch", return_value=None), \
+             patch.object(run, "suspended", side_effect=lambda _s, p: p in state), \
+             patch.object(run, "latest_backup", return_value=directory), \
+             patch.object(sys, "argv", ["run.py", "-s", "test", "quickapp", *argv]), \
+             contextlib.redirect_stdout(out := io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            run.main()
+        return out.getvalue(), events, state
+
+    def test_off_and_on_skip_usagestats_but_check_still_reads_it(self):
+        """off / on 不展示「近期打开次数」，不该拉 usagestats；check 要拉。"""
+        for argv, wanted in ((("off",), False), (("on",), False), (("check",), True)):
+            with self.subTest(argv):
+                _, events, _ = self.drive(argv)
+                self.assertEqual(any("usagestats" in c for c in events), wanted)
+
+    def test_batch_package_list_replaces_per_package_pm_path(self):
+        """批量清单命中时不再逐包 pm path。"""
+        _, events, _ = self.drive(("off",))
+        self.assertTrue(any(c.startswith("pm list packages") for c in events))
+        self.assertEqual([c for c in events if c.startswith("pm path")], [])
+
+    def test_unreadable_package_list_falls_back_to_per_package_pm_path(self):
+        """清单两条通路都没读到包名时（HyperOS 4，#192）退回逐包 pm path。"""
+        _, events, _ = self.drive(("check",), listed=False)
+        self.assertTrue(any(c.startswith("pm path ") for c in events))
+
+    def test_check_lists_every_hap_handler(self):
+        """hap:// 有多个应答组件时要全部列出来，不是只报第一个。"""
+        def shell(_s, cmd):
+            if cmd.startswith("pm query-activities"):
+                return "  com.example.a/.One\n  com.example.b/.Two\n"
+            if cmd.startswith("pm list packages") and "-d" not in cmd:
+                return "".join(f"package:{p}\n" for p in self.PKGS[1:])
+            return ""
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(run, "sh", side_effect=shell), \
+             patch.object(run, "quickapp_switch", return_value=None), \
+             patch.object(run, "suspended", return_value=False), \
+             patch.object(run, "latest_backup", return_value=directory), \
+             patch.object(sys, "argv", ["run.py", "-s", "test", "quickapp", "check"]), \
+             contextlib.redirect_stdout(out := io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            run.main()
+        text = out.getvalue()
+        self.assertIn("com.example.a/.One", text)
+        self.assertIn("com.example.b/.Two", text)
+
+    def test_fold_open_reads_wm_size_once(self):
+        """wm size 读一次就够，别一行里发两趟。"""
+        events = []
+        with patch.object(run, "sh", side_effect=lambda _s, cmd: events.append(cmd) or "Physical size: 2504x2312\n"):
+            self.assertTrue(run.fold_open("test"))
+        self.assertEqual(events, ["wm size"])
+        with patch.object(run, "sh", side_effect=lambda _s, cmd: events.append(cmd) or "Physical size: 1120x2528\n"):
+            self.assertFalse(run.fold_open("test"))
+
+    def test_record_skips_packages_already_written(self):
+        """同一台手机反复挂起/关闭时，suspended.txt 不越写越长。"""
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(run, "latest_backup", return_value=directory):
+            run.record("test", ["com.a", "com.b"])
+            run.record("test", ["com.b", "com.c"])
+            lines = Path(directory, "suspended.txt").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, ["com.a", "com.b", "com.c"])
 
 
 if __name__ == "__main__":
