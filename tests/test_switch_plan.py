@@ -95,6 +95,12 @@ class ScreenBandTests(unittest.TestCase):
         self.assertEqual([t for t, _, _ in short.targets], ["广告推荐"])
         self.assertEqual([t for t, _, _ in tall.targets], [])
 
+    def test_the_band_constants_are_pinned_near_both_edges(self):
+        # 170 在 0.08H=160 与 0.09H=180 之间；1900 在 0.90H=1800 与 0.985H=1970 之间。
+        plan = fast.plan_switches([("上边缘", True, (500, 170)),
+                                   ("下边缘", True, (500, 1900))], screen_h=2000)
+        self.assertEqual([t for t, _, _ in plan.targets], ["上边缘", "下边缘"])
+
 
 if __name__ == "__main__":
     unittest.main()

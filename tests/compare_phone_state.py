@@ -6,11 +6,11 @@
     python tests/compare_phone_state.py /tmp/aac-baseline/tool
 
 比三处：`Phone.texts()`（页面 × 两种屏尺寸 × 读屏策略开 / 关）、
-`explore.entries()`（页面 × 包名）、`Phone.off()`（安全模式开 / 关）。
+`explore.entries()`（页面 × 包名）、`Phone.off()`（两种屏尺寸 × 安全模式 × 三档 `only`）。
 两边必须各起一个子进程：模块名相同，同进程里 import 不了两份 `fast`。
 
-结论不只看「相等」——驱动同时打印守卫数字（策略 / 包名 / 安全模式是否真的改变了输出），
-全是 0 就说明对拍什么也没测到。
+结论不只看「相等」——驱动同时打印守卫数字（策略 / 包名 / `off` 每个场景点到了哪些标题），
+全是 0 或某一支退化了就说明对拍什么也没测到。
 """
 import json
 import os
@@ -30,16 +30,19 @@ TWO_WINDOWS = '''<hierarchy rotation="0">
 </hierarchy>'''
 
 def switch_page(w, h):
-    """按屏宽高参数化的开关页：两条普通、两条保护、两条带外，两种尺寸下都可达。
+    """按屏宽高参数化的开关页：普通、保护、带外都有，两种尺寸下都可达。
 
+    带内两行贴着 8% / 98.5% 边界放（0.077 / 0.929），常量一改分类就变；
+    带外两行完全在屏内，只有中心越界——否则「没点」分不清是被过滤还是没读到。
     守卫按标题回认点击坐标，所以这里同时交回每行开关的中心点。
     """
-    rows = [("顶部广告", True, 0.02), ("广告推荐", True, 0.20), ("猜你喜欢", False, 0.35),
-            ("限制广告跟踪", False, 0.50), ("防止广告追踪", True, 0.65), ("底部广告", True, 0.985)]
+    rows = [("顶部广告", True, 0.02), ("上边缘广告", True, 0.077), ("广告推荐", True, 0.20),
+            ("猜你喜欢", False, 0.35), ("限制广告跟踪", False, 0.50), ("防止广告追踪", True, 0.65),
+            ("下边缘广告", True, 0.929), ("底部广告", True, 0.985)]
     row_h = max(12, h // 60)
     nodes, coords = [], {}
     for title, checked, ratio in rows:
-        y0 = int(h * ratio)
+        y0 = min(int(h * ratio), h - row_h)
         y1 = y0 + row_h
         l, r = int(w * 0.88), int(w * 0.98)
         nodes.append(
@@ -103,7 +106,7 @@ def dump(tool_dir):
         for size in SIZES:
             page, _ = switch_page(*size)
             for safe in (True, False):
-                for only in (None, ["运营任务"]):
+                for only in (None, ["运营任务"], ["广告推荐"]):
                     clock = fixtures.Clock()
                     fixtures.install_clock(fast, clock)
                     lines, clicked = [], []
@@ -111,13 +114,17 @@ def dump(tool_dir):
                                             say=lines.append)
                     p.safe_mode = safe
                     p.click = lambda x, y, _c=clock, _a=clicked: (_c.click(), _a.append((x, y)))
-                    if safe:
-                        os.environ["AAC_REF"] = "1"      # 更早的实现靠环境变量；当前两版都忽略它
-                    else:
+                    label = "None" if only is None else only[0]
+                    previous = os.environ.pop("AAC_REF", None)
+                    try:
+                        if safe:
+                            os.environ["AAC_REF"] = "1"   # 更早的实现靠环境变量；当前两版都忽略它
+                        done = p.off(page="系统·广告服务", only=only)
+                    finally:
                         os.environ.pop("AAC_REF", None)
-                    done = p.off(page="系统·广告服务", only=only)
-                    os.environ.pop("AAC_REF", None)
-                    out.append({"id": f"{size[0]}x{size[1]}|safe={safe}|only={only is not None}",
+                        if previous is not None:
+                            os.environ["AAC_REF"] = previous
+                    out.append({"id": f"{size[0]}x{size[1]}|safe={safe}|only={label}",
                                 "done": done, "clicks": clock.clicks, "clicked": clicked,
                                 "changed": p.changed, "lines": lines})
         return out
@@ -134,7 +141,20 @@ def collect(tool_dir):
 
 
 def off_guards(records):
-    """每个场景断言它自己那条分支：点到了哪些标题、带外行一次都不点、重试真的补点。"""
+    """每个场景断言它自己那条分支：点到哪些标题、核对几项、带外行一次不点、重试真的补点。"""
+    expected_clicks = {
+        ("None", False): {"上边缘广告", "广告推荐", "下边缘广告", "限制广告跟踪"},
+        ("None", True): {"限制广告跟踪"},
+        ("运营任务", False): {"限制广告跟踪"},
+        ("运营任务", True): {"限制广告跟踪"},
+        ("广告推荐", False): {"广告推荐", "限制广告跟踪"},
+        ("广告推荐", True): {"广告推荐", "限制广告跟踪"},
+    }
+    expected_checked = {
+        ("None", False): 8, ("None", True): 2,
+        ("运营任务", False): 2, ("运营任务", True): 2,
+        ("广告推荐", False): 3, ("广告推荐", True): 3,
+    }
     bad = 0
     for rec in records:
         size_s, safe_s, only_s = rec["id"].split("|")
@@ -143,12 +163,14 @@ def off_guards(records):
         by_xy = {xy: title for title, xy in coords.items()}
         clicked = [by_xy.get(tuple(xy)) for xy in rec["clicked"]]
         got = set(clicked)
-        safe, only = safe_s == "safe=True", only_s == "only=True"
-        expected = {"限制广告跟踪"} if (safe or only) else {"广告推荐", "限制广告跟踪"}
+        key = (only_s.removeprefix("only="), safe_s == "safe=True")
+        expected = expected_clicks[key]
+        summary = f"核对 {expected_checked[key]} 项，调整 0 项"
         ok = (got == expected
               and rec["clicks"] > len(expected)          # 静态页回读不变，重试必须补点
               and "顶部广告" not in got and "底部广告" not in got
-              and None not in got)
+              and None not in got
+              and any(summary in line for line in rec["lines"]))
         bad += 0 if ok else 1
         print(f"守卫：{rec['id']} 点到 {sorted(x for x in got if x)}，共 {rec['clicks']} 次，"
               f"{'ok' if ok else 'FAIL'}")
